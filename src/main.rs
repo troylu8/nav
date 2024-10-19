@@ -1,5 +1,8 @@
 
-use std::fmt::Display;
+use std::borrow::Borrow;
+use std::collections::HashMap;
+use std::ffi::{OsStr, OsString};
+use std::fmt::{Debug, Display};
 use std::fs::DirEntry;
 use std::path::{Component, PathBuf};
 use std::{env, fs};
@@ -16,7 +19,7 @@ fn main() {
     let y = height / 2;
 
     
-    // clear();
+    clear();
 
 
     let desired_x = path_buf.iter().fold(0, |acc, x| acc + x.len() + 3) as u16 // include " \ " after every component
@@ -27,71 +30,170 @@ fn main() {
     let x = desired_x.min(width/2);
 
     // print_path(&path_buf, x, 0);
-    print_ls(&path_buf, x + 10, height, None);
+    let mut a= FileLibrary::new(&path_buf, height as usize);
+    a.print(x + 10);
+
+    // dbg!(a);
 
 }
 
-fn files_equal(a: &DirEntry, b: &DirEntry) -> bool {
-    let metadata_a = a.metadata().unwrap();
-    let metadata_b = b.metadata().unwrap();
 
-    // if two files considered equal if they share a filename and date created
-    a.file_name() == b.file_name() && metadata_a.created().unwrap() == metadata_b.created().unwrap()
+
+#[derive(Debug)]
+struct FileLibrary {
+    curr_ls: Listing,
+    last_seen: HashMap<PathBuf, DirEntry>,
+    height: usize,
+    half_height: usize
 }
+impl FileLibrary {
 
-fn get_y_above(path: &PathBuf, height: u16, last_seen: Option<DirEntry>) -> usize {
-    let mut dirs = fs::read_dir(path).unwrap().map(|x| x.unwrap()).filter(|x| x.file_type().unwrap().is_dir());
+    fn new(path: &PathBuf, height: usize) -> Self {
+        Self {
+            curr_ls: Listing::new(path, height, None),
+            last_seen: HashMap::new(),
+            height,
+            half_height: height/2
+        }
+    }
 
-    match last_seen {
-        None => {
-            for i in 0..height {
-                if let None = dirs.next() {
-                    return i as usize / 2;
-                }
-            }
+    fn set_listing(&mut self, path: &PathBuf) {        
+        self.curr_ls = Listing::new(path, self.height, self.last_seen.get(path));
+    }
+
+    fn files_equal(a: &DirEntry, b: &DirEntry) -> bool {
+        // if two files considered equal if they share a name and type
+        a.file_name() == b.file_name() && a.file_type().unwrap() == b.file_type().unwrap()
+    }
+
+    fn print(&mut self, x: u16) {
         
-            height as usize / 2
+        // gap from bottom of ls to bottom of cmd
+        let needed = (self.curr_ls.curr_i as i32) + (self.half_height as i32) - (self.curr_ls.ls.len() as i32);
+        if needed > 0 {
+            self.curr_ls.add(needed as usize);
         }
-        Some(last_seen) => {
-            for (i, dir_entry) in dirs.enumerate() {
-                if files_equal(&last_seen, &dir_entry) {
-                    return i;
+
+        let start_i = 0.max(self.curr_ls.curr_i as i32 - self.half_height as i32) as usize;
+
+        let start_y = 0.max(self.half_height as i32 - self.curr_ls.curr_i as i32) as usize;
+        
+        // min ( all the way to the bottom , amt of entries on screen + after )
+        for d in 0..(self.height).min(self.curr_ls.ls.len() - start_i) {
+            print_at(self.curr_ls.ls[start_i + d].file_name().to_str().unwrap(), x, (start_y + d) as u16).unwrap();
+        }
+    }
+}
+
+
+struct Listing {
+    ls: Vec<DirEntry>,
+    curr_i: usize,
+    all_iter: Box<dyn Iterator<Item = DirEntry>>,
+}
+impl Debug for Listing {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Listing").field("ls", &self.ls).field("curr_i", &self.curr_i).finish()
+    }
+}
+impl Listing {
+    fn new(path: &PathBuf, height: usize, last_seen: Option<&DirEntry>) -> Self {
+        
+        let dirs = fs::read_dir(path).unwrap().map(|x| x.unwrap()).filter(|x| x.file_type().unwrap().is_dir());
+        let files = fs::read_dir(path).unwrap().map(|x| x.unwrap()).filter(|x| !x.file_type().unwrap().is_dir());
+        let all_iter = Box::new(dirs.chain(files));
+        
+        let mut res = Self {
+            ls: vec![],
+            curr_i: 0,
+            all_iter
+        };
+        
+        match last_seen {
+            None => {
+                // add height amt of items into ls
+                let mut dir_count = 0;
+                for _ in 0..height {
+                    if let Some(dir_entry) = res.all_iter.next() {
+                        
+                        if dir_entry.file_type().unwrap().is_dir() {
+                            dir_count += 1;
+                        }
+                        
+                        res.ls.push(dir_entry);
+                        
+                    }
+                    else { break };
                 }
-            }
 
-            get_y_above(path, height, None)
+                res.curr_i = dir_count/2;
+            }
+            Some(last_seen) => {
+                
+                // read until last seen was found
+                while let Some(dir_entry) = res.all_iter.next() {
+                    if FileLibrary::files_equal(&last_seen, &dir_entry) {
+                        res.curr_i = res.ls.len();
+                        break;
+                    }
+                    else { res.ls.push(dir_entry); }
+                }
+
+                // if last seen was found, push to ls. otherwise, act as if it's None
+                if let Some(dir_entry) = res.all_iter.next() {
+                    res.ls.push(dir_entry);
+                }
+                else { return Listing::new(path, height, None); }
+
+                // add the remaining height/2 items to ls
+                for _ in 0..height/2 {
+                    if let Some(dir_entry) = res.all_iter.next() {
+                        res.ls.push(dir_entry);
+                    }
+                    else { break };
+                }
+
+            }
+        }
+
+        res
+    }
+
+    fn add(&mut self, amt: usize) {
+        for _ in 0..amt {
+            if let Some(dir_entry) = self.all_iter.next() {
+                self.ls.push(dir_entry);
+            }
         }
     }
-    
 }
 
-fn print_ls(path: &PathBuf, x: u16, height: u16, last_seen: Option<DirEntry>) -> Result<(), Error> {
-
+// fn print_ls(path: &PathBuf, x: u16, height: u16, last_seen: Option<DirEntry>) -> Result<(), Error> {
     
-    let above= get_y_above(path, height, last_seen);
+//     let above= get_y_above(path, height, last_seen);
     
-    let y: i32 = height as i32/2 - above as i32;
-    let mut dirs = fs::read_dir(path).unwrap().map(|x| x.unwrap()).filter(|x| x.file_type().unwrap().is_dir());
+//     let y: i32 = height as i32/2 - above as i32;
+//     let mut dirs = fs::read_dir(path).unwrap().map(|x| x.unwrap()).filter(|x| x.file_type().unwrap().is_dir());
 
-    for _ in y..0 { dirs.next(); } // offscreen
+//     for _ in y..0 { dirs.next(); } // offscreen
 
-    let mut y = y.max(0) as u16;
+//     let mut y = y.max(0) as u16;
 
-    for dir in dirs {
-        if y > height { return Ok(()); }
-        print_at(dir.file_name().to_str().unwrap(), x, y)?;
-        y += 1;
-    }
+//     for dir in dirs {
+//         if y > height { return Ok(()); }
+//         print_at(dir.file_name().to_str().unwrap(), x, y)?;
+//         y += 1;
+//     }
 
-    let files = fs::read_dir(path).unwrap().map(|x| x.unwrap()).filter(|x| !x.file_type().unwrap().is_dir());
-    for file in files {
-        if y > height { return Ok(()); }
-        print_at(file.file_name().to_str().unwrap(), x, y)?;
-        y += 1;
-    }
+//     let files = fs::read_dir(path).unwrap().map(|x| x.unwrap()).filter(|x| !x.file_type().unwrap().is_dir());
+//     for file in files {
+//         if y > height { return Ok(()); }
+//         print_at(file.file_name().to_str().unwrap(), x, y)?;
+//         y += 1;
+//     }
 
-    Ok(())
-}
+//     Ok(())
+// }
 
 fn clear() {
     print!("{esc}c", esc = 27 as char);
