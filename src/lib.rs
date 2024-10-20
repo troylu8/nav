@@ -219,7 +219,7 @@ impl Map {
     }
 
     pub fn move_up(&mut self) {
-        if self.curr_i == 0 {
+        if self.curr_i > 0 {
             self.curr_i -= 1;
         }
     }

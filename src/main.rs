@@ -11,6 +11,10 @@ fn main() -> Result<(), Error> {
     
     let mut map = Map::new(env::current_dir()?)?;
 
+    map.move_down();
+    map.move_into();
+    map.move_up();
+    map.move_out();
     map.print()?;
 
     // dbg!(map);
