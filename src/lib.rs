@@ -1,13 +1,25 @@
 
 use std::collections::HashMap;
+use std::ffi::{OsStr, OsString};
 use std::fmt::{Debug, Display};
 use std::fs::DirEntry;
 use std::path::{Component, Path, PathBuf};
 use std::fs;
-use std::io::{stdout, Error};
+use std::io::{stdout, Error, Write};
 
 use crossterm::*;
 use crossterm::style::Print;
+
+#[derive(Debug)]
+struct FileDesc {
+    name: OsString,
+    is_dir: bool
+}
+impl PartialEq<DirEntry> for FileDesc {
+    fn eq(&self, other: &DirEntry) -> bool {
+        other.file_name() == self.name && other.metadata().unwrap().is_dir() == self.is_dir
+    }
+}
 
 pub struct Map {
     width: u16,
@@ -17,7 +29,7 @@ pub struct Map {
     height: u16,
     height_half: u16,
 
-    last_seen: HashMap<PathBuf, DirEntry>,
+    last_seen: HashMap<OsString, FileDesc>,
 
     path: PathBuf,
     ls: Vec<DirEntry>,
@@ -34,11 +46,17 @@ impl Map {
     pub fn new(path: PathBuf) -> Result<Self, Error> {
 
         let (width, height) = terminal::size().unwrap();
+
+        execute!(
+            stdout(),
+            crossterm::cursor::Hide,
+            terminal::DisableLineWrap,
+        )?;
         
         let mut res = Self {
             width,
             width_half: width/2,
-            center: width/2,
+            center: Map::path_display_width(&path).min(width as usize / 2) as u16, // start at middle or left
             height,
             height_half: height/2,
 
@@ -73,17 +91,21 @@ impl Map {
 
     fn update_ls(&mut self) -> Result<(), Error> {
 
-        let desired_x = self.path.iter().fold(0, |acc, x| acc + x.len() + 3) as u16 // include " \ " after every component
-            - 1 // " >" is behind the last component instead of " \ "
-            - 1 // 0 indexed
-            - 4; // ignore "\" + " \ " used by root dir
-        self.center = desired_x.min(self.width_half);
+        
 
         self.ls.clear();
         self.all_iter = Map::iter_dirs_first(&self.path);
         
+        let last_seen_key = &self.path.as_os_str().to_os_string();
+
+        match self.last_seen.get(last_seen_key) {
+            Some(file_desc) => print_at(file_desc.name.to_str().unwrap().to_string() + "        ", 0, 0)?,
+            None => print_at("none       ", 0, 0)?,
+        };
+        
+
         // populate ls
-        match self.last_seen.get(&self.path) {
+        match self.last_seen.get(last_seen_key) {
             None => {
                 // add height amt of items into ls
                 let mut dir_count = 0;
@@ -106,7 +128,7 @@ impl Map {
                 
                 // read until last seen was found
                 while let Some(dir_entry) = self.all_iter.next() {
-                    if Map::files_equal(&last_seen, &dir_entry) {
+                    if last_seen == &dir_entry {
                         self.curr_i = self.ls.len();
                         break;
                     }
@@ -119,20 +141,11 @@ impl Map {
                 }
                 // ..otherwise (the file was deleted), remove from last_seen and try again
                 else { 
-                    self.last_seen.remove(&self.path);
+                    self.last_seen.remove(last_seen_key);
                     return self.update_ls();
                 }
 
                 self.fill_up();
-
-                // add the remaining height/2 items to ls
-                // for _ in 0..self.height/2 {
-                //     if let Some(dir_entry) = self.all_iter.next() {
-                //         self.ls.push(dir_entry);
-                //     }
-                //     else { break };
-                // }
-
             }
         }
 
@@ -145,10 +158,22 @@ impl Map {
         let start_i = 0.max(self.curr_i as i32 - self.height_half as i32) as usize;
 
         let start_y = 0.max(self.height_half as i32 - self.curr_i as i32) as usize;
+        let x = self.center + 4;
+        let entries_to_print = (self.height as usize).min(self.ls.len() - start_i);
         
         // min ( all the way to the bottom , amt of entries on screen + after )
-        for d in 0..(self.height as usize).min(self.ls.len() - start_i) {
-            print_at(self.ls[start_i + d].file_name().to_str().unwrap(), self.center + 4, (start_y + d) as u16)?;
+        for d in 0..entries_to_print {
+            clear_row(self.ls[start_i + d].file_name().to_str().unwrap(), x, (start_y + d) as u16, self.width)?;
+        }
+
+        // clear rows above
+        for y in 0..start_y {
+            clear_row("", x, y as u16, self.width)?;
+        }
+
+        // clear rows below
+        for y in (start_y as u16 + entries_to_print as u16)..self.height {
+            clear_row("", x, y as u16, self.width)?;
         }
 
         Ok(())
@@ -167,6 +192,8 @@ impl Map {
     fn print_path(&self) -> Result<(), Error> {
 
         let mut x = self.center;
+
+        clear_from(0, self.height_half, self.center as usize)?;
 
         print_at(">", x, self.height_half)?;
         
@@ -194,7 +221,7 @@ impl Map {
 
 
     pub fn print(&self) -> Result<(), Error> {
-        clear();
+        clear()?;
         self.print_path()?;
         self.print_ls()?;
 
@@ -202,71 +229,112 @@ impl Map {
     }
 
     pub fn move_into(&mut self) -> Result<(), Error> {
-        if !self.ls.is_empty() {
-            self.path.push(self.ls[self.curr_i].file_name());
-            self.update_ls()?
+        if !self.ls.is_empty() && self.ls[self.curr_i].file_type()?.is_dir() {
+
+            let file_name = self.ls[self.curr_i].file_name();
+
+            let new_center = 
+                (self.center + file_name.len() as u16 + 3) // add " \ xxxxx"
+                .min((self.width as f32 * 0.75) as u16);
+
+            for y in 0..self.height {
+                clear_from(self.center, y, (new_center - self.center + 4) as usize)?;
+            }
+
+            self.center = new_center;
+
+            self.path.push(file_name);
+
+            self.update_ls()?;
+
+            self.print_path()?;
+            self.print_ls()?;
         }
 
         Ok(())
     }
 
     pub fn move_out(&mut self) -> Result<(), Error> {
+
+        let file_desc = FileDesc {
+            name: self.ls[self.curr_i].file_name(),
+            is_dir: self.ls[self.curr_i].file_type()?.is_dir()
+        };
+        let last_seen_key = self.path.as_os_str().to_os_string();
+
         if self.path.pop() {
+
+            self.last_seen.insert(last_seen_key, file_desc);
+
             self.update_ls()?;
+
+
+            self.center = Map::path_display_width(&self.path).min(self.width_half as usize) as u16;
+
+            clear_row(">", self.center, self.height_half, self.center + 4)?;
+            self.print_ls()?;
+            self.print_path()?;
         }
 
         Ok(())
     }
 
-    pub fn move_up(&mut self) {
+    pub fn move_up(&mut self) -> Result<(), Error> {
         if self.curr_i > 0 {
             self.curr_i -= 1;
+
+            return self.print_ls();
         }
+
+        Ok(())
     }
 
-    pub fn move_down(&mut self) {
-        if self.curr_i < self.ls.len()-1 {
+    pub fn move_down(&mut self) -> Result<(), Error> {
+        if !self.ls.is_empty() && self.curr_i < self.ls.len()-1 {
             self.curr_i += 1;
             self.fill_up();
+
+            return self.print_ls();
         }
+
+        Ok(())
+    }
+
+    fn path_display_width(path: &PathBuf) -> usize {
+        path.iter().fold(0, |acc, x| acc + x.len() + 3) // include " \ " after every component
+            - 1 // " >" is behind the last component instead of " \ "
+            - 1 // 0 indexed
+            - 4 // ignore "\" + " \ " used by root dir
     }
 }
 
-// fn print_ls(path: &PathBuf, x: u16, height: u16, last_seen: Option<DirEntry>) -> Result<(), Error> {
-    
-//     let above= get_y_above(path, height, last_seen);
-    
-//     let y: i32 = height as i32/2 - above as i32;
-//     let mut dirs = fs::read_dir(path).unwrap().map(|x| x.unwrap()).filter(|x| x.file_type().unwrap().is_dir());
 
-//     for _ in y..0 { dirs.next(); } // offscreen
-
-//     let mut y = y.max(0) as u16;
-
-//     for dir in dirs {
-//         if y > height { return Ok(()); }
-//         print_at(dir.file_name().to_str().unwrap(), x, y)?;
-//         y += 1;
-//     }
-
-//     let files = fs::read_dir(path).unwrap().map(|x| x.unwrap()).filter(|x| !x.file_type().unwrap().is_dir());
-//     for file in files {
-//         if y > height { return Ok(()); }
-//         print_at(file.file_name().to_str().unwrap(), x, y)?;
-//         y += 1;
-//     }
-
-//     Ok(())
-// }
-
-fn clear() {
-    print!("{esc}c", esc = 27 as char);
+fn clear() -> Result<(), Error> {
+    execute!(
+        stdout(),
+        terminal::Clear(terminal::ClearType::All)    
+    )
 }
 fn print_at<T: Display>(str: T, x: u16, y: u16) -> Result<(), Error> {
     execute!(
         stdout(),
         cursor::MoveTo(x, y),
         Print(str),
+    )
+}
+fn clear_from(x: u16, y: u16, amt: usize) -> Result<(), Error> {
+    execute!(
+        stdout(),
+        cursor::MoveTo(x, y),
+        Print(" ".repeat(amt))
+    )
+}
+fn clear_row(str: &str, x: u16, y: u16, total_width: u16) -> Result<(), Error> {
+    execute!(
+        stdout(),
+        cursor::MoveTo(x, y),
+        Print(str),
+        Print("_".repeat(total_width as usize - str.len() - x as usize))
     )
 }
 
