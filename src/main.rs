@@ -1,6 +1,6 @@
 
 use std::env;
-use std::io::{stdout, Error};
+use std::io::Error;
 
 
 use map::Map;
@@ -22,13 +22,13 @@ fn main() -> Result<(), Error> {
                     map.move_out()?;
                 },
                 KeyCode::Right => {
-                    map.move_into()?;
+                    let _ = map.move_into();
                 },
                 KeyCode::Up => {
-                    map.move_up();
+                    map.move_up()?;
                 },
                 KeyCode::Down => {
-                    map.move_down();
+                    map.move_down()?;
                 },
                 _ => {}
             }

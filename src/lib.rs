@@ -1,11 +1,11 @@
 
 use std::collections::HashMap;
-use std::ffi::{OsStr, OsString};
+use std::ffi::OsString;
 use std::fmt::{Debug, Display};
 use std::fs::DirEntry;
 use std::path::{Component, Path, PathBuf};
 use std::fs;
-use std::io::{stdout, Error, Write};
+use std::io::{stdout, Error};
 
 use crossterm::*;
 use crossterm::style::Print;
@@ -17,7 +17,7 @@ struct FileDesc {
 }
 impl PartialEq<DirEntry> for FileDesc {
     fn eq(&self, other: &DirEntry) -> bool {
-        other.file_name() == self.name && other.metadata().unwrap().is_dir() == self.is_dir
+        other.file_name() == self.name && other.file_type().unwrap().is_dir() == self.is_dir
     }
 }
 
@@ -65,46 +65,44 @@ impl Map {
             path,
             ls: vec![],
             curr_i: 0,
-            all_iter: Map::iter_dirs_first(&Path::new(".").into()) // dummy value
+            all_iter: Map::iter_dirs_first(&Path::new(".").into())?
         };
 
-        res.update_ls()?;
+        res.populate_ls()?;
         
         Ok(res)
     }
 
-    fn files_equal(a: &DirEntry, b: &DirEntry) -> bool {
-        // if two files considered equal if they share a name and type
-        a.file_name() == b.file_name() && a.file_type().unwrap() == b.file_type().unwrap()
-    }
-
-    fn iter_dirs_first(path: &PathBuf) -> Box<dyn Iterator<Item = DirEntry>> {
-        let dirs = fs::read_dir(path).unwrap().map(|x| x.unwrap()).filter(|x| x.file_type().unwrap().is_dir());
-        let files = fs::read_dir(path).unwrap().map(|x| x.unwrap()).filter(|x| !x.file_type().unwrap().is_dir());
-        Box::new(dirs.chain(files))
+    fn iter_dirs_first(path: &PathBuf) -> Result<Box<dyn Iterator<Item = DirEntry>>, Error> {
+        let dirs = fs::read_dir(path)?.map(|x| x.unwrap()).filter(|x| x.file_type().unwrap().is_dir());
+        let files = fs::read_dir(path)?.map(|x| x.unwrap()).filter(|x| !x.file_type().unwrap().is_dir());
+        Ok(Box::new(dirs.chain(files)))
     }
 
     pub fn set_path(&mut self, path: PathBuf) -> Result<(), Error> {
+        match Map::iter_dirs_first(&path) {
+            Ok(iter) => self.all_iter = iter,
+            Err(err) => {
+                if err.kind() == std::io::ErrorKind::PermissionDenied {
+                    print_at("NO ACCESS", 0, 0)?;
+                }
+                return Err(err);
+            }
+        };
+        self.all_iter = Map::iter_dirs_first(&path)?;
+
         self.path = path;
-        self.update_ls()
+
+        self.populate_ls()
     }
 
-    fn update_ls(&mut self) -> Result<(), Error> {
-
-        
+    /// assumes self.all_iter and self.path are correct
+    fn populate_ls(&mut self) -> Result<(), Error> {
 
         self.ls.clear();
-        self.all_iter = Map::iter_dirs_first(&self.path);
         
         let last_seen_key = &self.path.as_os_str().to_os_string();
 
-        match self.last_seen.get(last_seen_key) {
-            Some(file_desc) => print_at(file_desc.name.to_str().unwrap().to_string() + "        ", 0, 0)?,
-            None => print_at("none       ", 0, 0)?,
-        };
-        
-
-        // populate ls
         match self.last_seen.get(last_seen_key) {
             None => {
                 // add height amt of items into ls
@@ -125,27 +123,30 @@ impl Map {
                 self.curr_i = dir_count/2;
             }
             Some(last_seen) => {
-                
-                // read until last seen was found
-                while let Some(dir_entry) = self.all_iter.next() {
-                    if last_seen == &dir_entry {
-                        self.curr_i = self.ls.len();
-                        break;
+
+                loop {
+                    match self.all_iter.next() {
+                        Some(dir_entry) => {
+
+                            if last_seen == &dir_entry {
+                                self.curr_i = self.ls.len();
+                                self.ls.push(dir_entry);
+                                self.fill_up();
+
+                                return Ok(());
+                            }
+
+                            self.ls.push(dir_entry);
+                        }
+
+                        // made it to the end and last seen wasnt found, mustve been deleted
+                        None => {
+                            self.last_seen.remove(last_seen_key);
+                            return self.populate_ls();
+                        }
                     }
-                    else { break; }
                 }
-
-                // if last seen was found, push to ls..
-                if let Some(dir_entry) = self.all_iter.next() {
-                    self.ls.push(dir_entry);
-                }
-                // ..otherwise (the file was deleted), remove from last_seen and try again
-                else { 
-                    self.last_seen.remove(last_seen_key);
-                    return self.update_ls();
-                }
-
-                self.fill_up();
+                
             }
         }
 
@@ -233,6 +234,8 @@ impl Map {
 
             let file_name = self.ls[self.curr_i].file_name();
 
+            self.set_path(self.path.join(&file_name))?;
+
             let new_center = 
                 (self.center + file_name.len() as u16 + 3) // add " \ xxxxx"
                 .min((self.width as f32 * 0.75) as u16);
@@ -243,10 +246,6 @@ impl Map {
 
             self.center = new_center;
 
-            self.path.push(file_name);
-
-            self.update_ls()?;
-
             self.print_path()?;
             self.print_ls()?;
         }
@@ -256,18 +255,37 @@ impl Map {
 
     pub fn move_out(&mut self) -> Result<(), Error> {
 
-        let file_desc = FileDesc {
-            name: self.ls[self.curr_i].file_name(),
-            is_dir: self.ls[self.curr_i].file_type()?.is_dir()
-        };
-        let last_seen_key = self.path.as_os_str().to_os_string();
+        let focused_dir_entry = 
+            if  self.ls.is_empty() { None }
+            else { Some(&self.ls[self.curr_i]) };
+        
+        let name_before_pop = 
+            if let Some(name) = self.path.file_name() { Some(name.to_os_string()) }
+            else { None };
+
+        let path_before_pop = self.path.as_os_str().to_os_string();
 
         if self.path.pop() {
 
-            self.last_seen.insert(last_seen_key, file_desc);
+            if let Some(focused_dir_entry) = focused_dir_entry {
+                self.last_seen.insert(path_before_pop, FileDesc {
+                    name: focused_dir_entry.file_name(),
+                    is_dir: focused_dir_entry.file_type()?.is_dir()
+                });
+            }
 
-            self.update_ls()?;
 
+            let path_after_pop = self.path.as_os_str().to_os_string();
+
+            if let Some(name_before_pop) = name_before_pop {
+                self.last_seen.insert(path_after_pop, FileDesc {
+                    name: name_before_pop.to_os_string(),
+                    is_dir: true
+                });
+            }
+
+            self.all_iter = Map::iter_dirs_first(&self.path)?;
+            self.populate_ls()?;
 
             self.center = Map::path_display_width(&self.path).min(self.width_half as usize) as u16;
 
