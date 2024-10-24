@@ -4,7 +4,8 @@ use std::ffi::OsString;
 use std::fmt::{Debug, Display};
 use std::fs::DirEntry;
 use std::path::{Component, Path, PathBuf};
-use std::fs;
+use std::time::Duration;
+use std::{fs, thread};
 use std::io::{stdout, Error};
 
 use crossterm::*;
@@ -82,7 +83,7 @@ impl Map {
                 if err.kind() == std::io::ErrorKind::PermissionDenied {
 
                     let str = self.ls[self.curr_i].file_name().to_str().unwrap().to_string() + " [Access is denied.]";
-                    set_color(style::Color::DarkRed)?;
+                    set_focused_style(style::Color::DarkRed)?;
                     print_at(&str, self.center + Self::CENTER_GAP, self.height_half)?;
                 }
                 return Err(err);
@@ -161,7 +162,7 @@ impl Map {
         let x = self.center + Self::CENTER_GAP;
         let entries_to_print = (self.height as usize).min(self.ls.len() - start_i);
         
-        set_color(style::Color::White)?;
+        execute!(stdout(), style::SetAttribute(style::Attribute::Reset))?;
 
         // min ( all the way to the bottom , amt of entries on screen + after )
         for d in 0..entries_to_print {
@@ -170,6 +171,7 @@ impl Map {
             if !self.ls[start_i + d].file_type()?.is_dir() {
                 set_color(style::Color::DarkGrey)?;
             }
+
             
             clear_row(self.ls[start_i + d].file_name().to_str().unwrap(), x, (start_y + d) as u16, self.width)?;
         }
@@ -182,6 +184,19 @@ impl Map {
         // clear rows below
         for y in (start_y as u16 + entries_to_print as u16)..self.height {
             clear_row("", x, y as u16, self.width)?;
+        }
+
+        // emphasize focused entry
+        if !self.ls.is_empty() {
+            
+            if self.ls[self.curr_i].file_type()?.is_dir() {
+                set_focused_style(style::Color::DarkYellow)?;
+            }
+            else {
+                set_focused_style(style::Color::DarkGrey)?;
+            }
+            
+            print_at(self.ls[self.curr_i].file_name().to_str().unwrap(), x, self.height_half)?;
         }
 
         Ok(())
@@ -201,9 +216,11 @@ impl Map {
 
         let mut x = self.center;
 
+        execute!(stdout(), style::SetAttribute(style::Attribute::Reset))?;
+        set_color(style::Color::Cyan)?;
+
         clear_from(0, self.height_half, self.center as usize)?;
 
-        set_color(style::Color::White)?;
 
         print_at(">", x, self.height_half)?;
         
@@ -239,25 +256,40 @@ impl Map {
     }
 
     pub fn move_into(&mut self) -> Result<(), Error> {
-        if !self.ls.is_empty() && self.ls[self.curr_i].file_type()?.is_dir() {
-
-            let file_name = self.ls[self.curr_i].file_name();
-
-            self.set_path(self.path.join(&file_name))?;
-
-            let new_center = 
-                (self.center + file_name.len() as u16 + 3) // add " \ xxxxx"
-                .min((self.width as f32 * 0.75) as u16);
-
-            for y in 0..self.height {
-                clear_from(self.center, y, (new_center - self.center + Self::CENTER_GAP) as usize)?;
-            }
-
-            self.center = new_center;
-
-            self.print_path()?;
-            self.print_ls()?;
+        
+        if self.ls.is_empty() {
+            set_focused_style(style::Color::DarkGrey)?;
+            print_at("[Nothing here.]", self.center + Self::CENTER_GAP, self.height_half)?;
+            
+            return Ok(());
         }
+
+        if !self.ls[self.curr_i].file_type()?.is_dir() {
+            let str = self.ls[self.curr_i].file_name().to_str().unwrap().to_string() + " [Not a directory.]";
+            set_focused_style(style::Color::DarkGrey)?;
+            print_at(&str, self.center + Self::CENTER_GAP, self.height_half)?;
+
+            return Ok(());
+        }
+
+
+        let file_name = self.ls[self.curr_i].file_name();
+
+        self.set_path(self.path.join(&file_name))?;
+
+        let new_center = 
+            (self.center + file_name.len() as u16 + 3) // add " \ xxxxx"
+            .min((self.width as f32 * 0.75) as u16);
+
+        for y in 0..self.height {
+            clear_from(self.center, y, (new_center - self.center + Self::CENTER_GAP) as usize)?;
+        }
+
+        self.center = new_center;
+
+        self.print_path()?;
+        self.print_ls()?;
+        
 
         Ok(())
     }
@@ -350,6 +382,15 @@ fn clear() -> Result<(), Error> {
 fn set_color(color: style::Color) -> Result<(), Error> {
     execute!( stdout(), style::SetForegroundColor(color) )
 }
+
+fn set_focused_style(color: style::Color) -> Result<(), Error> {
+    execute!( 
+        stdout(), 
+        style::SetAttribute(style::Attribute::Reset),
+        style::SetAttribute(style::Attribute::Bold),
+        style::SetForegroundColor(color),
+    )
+}
 fn print_at<T: Display>(str: T, x: u16, y: u16) -> Result<(), Error> {
     execute!(
         stdout(),
@@ -369,7 +410,7 @@ fn clear_row(str: &str, x: u16, y: u16, total_width: u16) -> Result<(), Error> {
         stdout(),
         cursor::MoveTo(x, y),
         Print(str),
-        Print("_".repeat(total_width as usize - str.len() - x as usize))
+        Print(" ".repeat(total_width as usize - str.len() - x as usize))
     )
 }
 

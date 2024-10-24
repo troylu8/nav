@@ -28,17 +28,23 @@ fn main() -> Result<(), Error> {
             match code {
                 KeyCode::Left => map.move_out()?,
                 KeyCode::Right => { let _ = map.move_into(); },
-                KeyCode::Up => map.move_up()?,
-                KeyCode::Down => map.move_down()?,
-                KeyCode::Enter => break,
+                KeyCode::Up | KeyCode::BackTab => map.move_up()?,
+                KeyCode::Down | KeyCode::Tab => map.move_down()?,
+                KeyCode::Enter => {
+                    fs::write(map_home + "\\output.txt", map.get_path().to_str().unwrap())?;
+                    break;
+                },
+                KeyCode::Esc => {
+                    fs::write(map_home + "\\output.txt", ".")?;
+                    break;
+                }
                 _ => {}
             }
         }
     }
 
     execute!( stdout(), cursor::Show )?;
-    execute!( stdout(), style::ResetColor )?;
-    fs::write(map_home + "\\output.txt", map.get_path().to_str().unwrap())?;
+    execute!( stdout(), style::SetAttribute(style::Attribute::Reset) )?;
 
     Ok(())
 
