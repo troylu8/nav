@@ -22,6 +22,7 @@ impl PartialEq<DirEntry> for FileDesc {
 }
 
 pub struct Map {
+
     width: u16,
     width_half: u16,
     center: u16,
@@ -42,16 +43,11 @@ impl Debug for Map {
     }
 }
 impl Map {
+    const CENTER_GAP: u16 = 4;
 
     pub fn new(path: PathBuf) -> Result<Self, Error> {
 
         let (width, height) = terminal::size().unwrap();
-
-        execute!(
-            stdout(),
-            crossterm::cursor::Hide,
-            terminal::DisableLineWrap,
-        )?;
         
         let mut res = Self {
             width,
@@ -84,7 +80,10 @@ impl Map {
             Ok(iter) => self.all_iter = iter,
             Err(err) => {
                 if err.kind() == std::io::ErrorKind::PermissionDenied {
-                    print_at("NO ACCESS", 0, 0)?;
+
+                    let str = self.ls[self.curr_i].file_name().to_str().unwrap().to_string() + " [Access is denied.]";
+                    set_color(style::Color::DarkRed)?;
+                    print_at(&str, self.center + Self::CENTER_GAP, self.height_half)?;
                 }
                 return Err(err);
             }
@@ -159,11 +158,19 @@ impl Map {
         let start_i = 0.max(self.curr_i as i32 - self.height_half as i32) as usize;
 
         let start_y = 0.max(self.height_half as i32 - self.curr_i as i32) as usize;
-        let x = self.center + 4;
+        let x = self.center + Self::CENTER_GAP;
         let entries_to_print = (self.height as usize).min(self.ls.len() - start_i);
         
+        set_color(style::Color::White)?;
+
         // min ( all the way to the bottom , amt of entries on screen + after )
         for d in 0..entries_to_print {
+
+            // non-directories should be dark grey
+            if !self.ls[start_i + d].file_type()?.is_dir() {
+                set_color(style::Color::DarkGrey)?;
+            }
+            
             clear_row(self.ls[start_i + d].file_name().to_str().unwrap(), x, (start_y + d) as u16, self.width)?;
         }
 
@@ -196,13 +203,15 @@ impl Map {
 
         clear_from(0, self.height_half, self.center as usize)?;
 
+        set_color(style::Color::White)?;
+
         print_at(">", x, self.height_half)?;
         
         for dir in self.path.components().filter(|comp| Component::RootDir != *comp).rev() {
             let os_str = dir.as_os_str();
             
             if x as i32 - os_str.len() as i32 - 1 < 0 {
-                return print_at("...", 0.max(x as i32 - 4) as u16, self.height_half);
+                return print_at("...", 0.max(x as i32 - Self::CENTER_GAP as i32) as u16, self.height_half);
             }
             x -= os_str.len() as u16 + 1;
             print_at(os_str.to_str().unwrap(), x, self.height_half)?;
@@ -241,7 +250,7 @@ impl Map {
                 .min((self.width as f32 * 0.75) as u16);
 
             for y in 0..self.height {
-                clear_from(self.center, y, (new_center - self.center + 4) as usize)?;
+                clear_from(self.center, y, (new_center - self.center + Self::CENTER_GAP) as usize)?;
             }
 
             self.center = new_center;
@@ -289,7 +298,7 @@ impl Map {
 
             self.center = Map::path_display_width(&self.path).min(self.width_half as usize) as u16;
 
-            clear_row(">", self.center, self.height_half, self.center + 4)?;
+            clear_row(">", self.center, self.height_half, self.center + Self::CENTER_GAP)?;
             self.print_ls()?;
             self.print_path()?;
         }
@@ -324,6 +333,10 @@ impl Map {
             - 1 // 0 indexed
             - 4 // ignore "\" + " \ " used by root dir
     }
+
+    pub fn get_path(&self) -> &PathBuf {
+        &self.path
+    }
 }
 
 
@@ -332,6 +345,10 @@ fn clear() -> Result<(), Error> {
         stdout(),
         terminal::Clear(terminal::ClearType::All)    
     )
+}
+
+fn set_color(color: style::Color) -> Result<(), Error> {
+    execute!( stdout(), style::SetForegroundColor(color) )
 }
 fn print_at<T: Display>(str: T, x: u16, y: u16) -> Result<(), Error> {
     execute!(
