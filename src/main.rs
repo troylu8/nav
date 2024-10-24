@@ -10,7 +10,6 @@ use crossterm::{execute, cursor, style, terminal};
 use map::Map;
 
 fn main() -> Result<(), Error> {
-
     
     let map_home = env::var("MAP_HOME").unwrap();
     

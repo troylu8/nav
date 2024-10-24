@@ -17,3 +17,5 @@ New-Item -Path ($dir + "\output.txt")
 [Environment]::SetEnvironmentVariable("MAP_HOME", $dir, "User")
 
 pause
+
+Remove-Item $PSCommandPath -Force

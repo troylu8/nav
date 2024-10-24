@@ -13,3 +13,5 @@ Remove-Item -Path $MAP_HOME -Recurse
 [Environment]::SetEnvironmentVariable('MAP_HOME', [NullString]::Value, "User")
 
 pause
+
+Remove-Item $PSCommandPath -Force
