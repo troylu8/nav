@@ -7,7 +7,7 @@ use std::io::Error;
 use crossterm::event::*;
 use crossterm::{execute, cursor, style, terminal};
 
-use map::Map;
+use nav::Map;
 
 fn main() -> Result<(), Error> {
     
