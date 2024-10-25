@@ -1,0 +1,14 @@
+
+nav
+    open the map
+
+nav -h, -help
+    display this help page
+
+
+map controls
+--------------------------
+arrow keys  - navigate
+Enter       - move to map location
+Esc         - cancel
+

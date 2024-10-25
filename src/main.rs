@@ -11,7 +11,7 @@ use map::Map;
 
 fn main() -> Result<(), Error> {
     
-    let map_home = env::var("MAP_HOME").unwrap();
+    let nav_home = env::var("NAV_HOME").unwrap();
     
     execute!(
         stdout(),
@@ -21,21 +21,30 @@ fn main() -> Result<(), Error> {
 
     let mut map = Map::new(env::current_dir()?)?;
 
-    map.print()?;
-
     loop {
-        if let Event::Key(KeyEvent {kind: KeyEventKind::Press, code, ..}) = read()? {
+        
+        if let Event::Key( KeyEvent {kind: KeyEventKind::Press, code, modifiers, ..}) = read()? {
             match code {
                 KeyCode::Left => map.move_out()?,
-                KeyCode::Right => { let _ = map.move_into(); },
+                KeyCode::Right => { 
+                    match map.move_into() {
+                        // ignore permission denied error
+                        Err(err) if err.kind() != std::io::ErrorKind::PermissionDenied => return Err(err),
+                        _ => {}
+                    }
+                }, 
                 KeyCode::Up | KeyCode::BackTab => map.move_up()?,
                 KeyCode::Down | KeyCode::Tab => map.move_down()?,
                 KeyCode::Enter => {
-                    fs::write(map_home + "\\output.txt", map.get_path().to_str().unwrap())?;
+                    fs::write(nav_home + "\\map\\map_dest.txt", map.get_path().to_str().unwrap())?;
                     break;
                 },
                 KeyCode::Esc => {
-                    fs::write(map_home + "\\output.txt", ".")?;
+                    fs::write(nav_home + "\\map\\map_dest.txt", ".")?;
+                    break;
+                }
+                KeyCode::Char('c') if modifiers == KeyModifiers::CONTROL => {
+                    fs::write(nav_home + "\\map\\map_dest.txt", ".")?;
                     break;
                 }
                 _ => {}

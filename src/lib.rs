@@ -4,19 +4,18 @@ use std::ffi::OsString;
 use std::fmt::{Debug, Display};
 use std::fs::DirEntry;
 use std::path::{Component, Path, PathBuf};
-use std::time::Duration;
-use std::{fs, thread};
+use std::fs;
 use std::io::{stdout, Error};
 
 use crossterm::*;
 use crossterm::style::Print;
 
 #[derive(Debug)]
-struct FileDesc {
+struct EntryDesc {
     name: OsString,
     is_dir: bool
 }
-impl PartialEq<DirEntry> for FileDesc {
+impl PartialEq<DirEntry> for EntryDesc {
     fn eq(&self, other: &DirEntry) -> bool {
         other.file_name() == self.name && other.file_type().unwrap().is_dir() == self.is_dir
     }
@@ -31,12 +30,23 @@ pub struct Map {
     height: u16,
     height_half: u16,
 
-    last_seen: HashMap<OsString, FileDesc>,
+    /// some path -> entry we were looking at before moving out of this path
+    last_seen: HashMap<OsString, EntryDesc>,
 
     path: PathBuf,
+
+    /// list of entries in the current path. 
+    /// 
+    /// This list is NOT comprehensive - entries are added into this list when needed
+    /// 
+    /// Upon scrolling down, more entries may be added using `self.all_iter`
     ls: Vec<DirEntry>,
+
+    /// index of the focused entry in `self.ls`
     curr_i: usize,
-    all_iter: Box<dyn Iterator<Item = DirEntry>>,
+
+    /// iterator over the entries within the current path.
+    entries_iter: Box<dyn Iterator<Item = DirEntry>>,
 }
 impl Debug for Map {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -44,8 +54,10 @@ impl Debug for Map {
     }
 }
 impl Map {
+    /// distance between "C:\ some \ path >" and the list of entries
     const CENTER_GAP: u16 = 4;
 
+    /// initialize a new map
     pub fn new(path: PathBuf) -> Result<Self, Error> {
 
         let (width, height) = terminal::size().unwrap();
@@ -62,41 +74,48 @@ impl Map {
             path,
             ls: vec![],
             curr_i: 0,
-            all_iter: Map::iter_dirs_first(&Path::new(".").into())?
+            entries_iter: Map::iter_dirs_first(&Path::new(".").into())?
         };
 
         res.populate_ls()?;
+
+        execute!( stdout(), terminal::Clear(terminal::ClearType::All) )?;
+        res.print_path()?;
+        res.print_ls()?;
         
         Ok(res)
     }
 
+    /// get an iterator at `path`, with directories before files
     fn iter_dirs_first(path: &PathBuf) -> Result<Box<dyn Iterator<Item = DirEntry>>, Error> {
         let dirs = fs::read_dir(path)?.map(|x| x.unwrap()).filter(|x| x.file_type().unwrap().is_dir());
         let files = fs::read_dir(path)?.map(|x| x.unwrap()).filter(|x| !x.file_type().unwrap().is_dir());
         Ok(Box::new(dirs.chain(files)))
     }
 
+    /// set the current path to `path`
     pub fn set_path(&mut self, path: PathBuf) -> Result<(), Error> {
         match Map::iter_dirs_first(&path) {
-            Ok(iter) => self.all_iter = iter,
+            Ok(iter) => self.entries_iter = iter,
             Err(err) => {
-                if err.kind() == std::io::ErrorKind::PermissionDenied {
 
+                // display "permission denied" text
+                if err.kind() == std::io::ErrorKind::PermissionDenied {
                     let str = self.ls[self.curr_i].file_name().to_str().unwrap().to_string() + " [Access is denied.]";
-                    set_focused_style(style::Color::DarkRed)?;
+                    apply_focused_entry_style(style::Color::DarkRed)?;
                     print_at(&str, self.center + Self::CENTER_GAP, self.height_half)?;
                 }
+
                 return Err(err);
             }
         };
-        self.all_iter = Map::iter_dirs_first(&path)?;
 
         self.path = path;
 
         self.populate_ls()
     }
 
-    /// assumes self.all_iter and self.path are correct
+    /// populate `self.ls` with entries at `self.path` using `self.entries_iter`
     fn populate_ls(&mut self) -> Result<(), Error> {
 
         self.ls.clear();
@@ -105,10 +124,11 @@ impl Map {
 
         match self.last_seen.get(last_seen_key) {
             None => {
-                // add height amt of items into ls
                 let mut dir_count = 0;
+
+                // add height amt of items into ls
                 for _ in 0..self.height {
-                    if let Some(dir_entry) = self.all_iter.next() {
+                    if let Some(dir_entry) = self.entries_iter.next() {
                         
                         if dir_entry.file_type()?.is_dir() {
                             dir_count += 1;
@@ -119,19 +139,20 @@ impl Map {
                     }
                     else { break };
                 }
-    
+                
+                // if haven't been to this path before, focused entry defaults to the middle folder
                 self.curr_i = dir_count/2;
             }
             Some(last_seen) => {
 
                 loop {
-                    match self.all_iter.next() {
+                    match self.entries_iter.next() {
                         Some(dir_entry) => {
 
                             if last_seen == &dir_entry {
-                                self.curr_i = self.ls.len();
+                                self.curr_i = self.ls.len(); // focused entry is the entry we were at last time we were here
                                 self.ls.push(dir_entry);
-                                self.fill_up();
+                                self.fill_to_bottom();
 
                                 return Ok(());
                             }
@@ -139,7 +160,7 @@ impl Map {
                             self.ls.push(dir_entry);
                         }
 
-                        // made it to the end and last seen wasnt found, mustve been deleted
+                        // looked through all entries and last seen wasnt found, mustve been deleted
                         None => {
                             self.last_seen.remove(last_seen_key);
                             return self.populate_ls();
@@ -154,26 +175,24 @@ impl Map {
 
     }
 
+    /// print entries in current path
     fn print_ls(&self) -> Result<(), Error> {
+        execute!(stdout(), style::SetAttribute(style::Attribute::Reset))?;
 
         let start_i = 0.max(self.curr_i as i32 - self.height_half as i32) as usize;
 
         let start_y = 0.max(self.height_half as i32 - self.curr_i as i32) as usize;
         let x = self.center + Self::CENTER_GAP;
         let entries_to_print = (self.height as usize).min(self.ls.len() - start_i);
-        
-        execute!(stdout(), style::SetAttribute(style::Attribute::Reset))?;
 
-        // min ( all the way to the bottom , amt of entries on screen + after )
-        for d in 0..entries_to_print {
+        for delta in 0..entries_to_print {
 
             // non-directories should be dark grey
-            if !self.ls[start_i + d].file_type()?.is_dir() {
-                set_color(style::Color::DarkGrey)?;
+            if !self.ls[start_i + delta].file_type()?.is_dir() {
+                execute!( stdout(), style::SetForegroundColor(style::Color::DarkGrey) )?;
             }
-
             
-            clear_row(self.ls[start_i + d].file_name().to_str().unwrap(), x, (start_y + d) as u16, self.width)?;
+            clear_row(self.ls[start_i + delta].file_name().to_str().unwrap(), x, (start_y + delta) as u16, self.width)?;
         }
 
         // clear rows above
@@ -190,10 +209,10 @@ impl Map {
         if !self.ls.is_empty() {
             
             if self.ls[self.curr_i].file_type()?.is_dir() {
-                set_focused_style(style::Color::DarkYellow)?;
+                apply_focused_entry_style(style::Color::DarkYellow)?;
             }
             else {
-                set_focused_style(style::Color::DarkGrey)?;
+                apply_focused_entry_style(style::Color::DarkGrey)?;
             }
             
             print_at(self.ls[self.curr_i].file_name().to_str().unwrap(), x, self.height_half)?;
@@ -202,26 +221,25 @@ impl Map {
         Ok(())
     }
 
-    /// adds files into `ls` to fill screen, if they exist
-    fn fill_up(&mut self) {
+    /// adds files into `self.ls` to until there's enough to reach the bottom of the screen
+    fn fill_to_bottom(&mut self) {
         let needed = (self.curr_i as i32) + (self.height_half as i32) - (self.ls.len() as i32);
         for _ in 0..needed {
-            if let Some(dir_entry) = self.all_iter.next() {
+            if let Some(dir_entry) = self.entries_iter.next() {
                 self.ls.push(dir_entry);
             }
         }
     }
 
+    /// print the current path
     fn print_path(&self) -> Result<(), Error> {
+        execute!(stdout(), style::SetAttribute(style::Attribute::Reset))?;
 
         let mut x = self.center;
 
-        execute!(stdout(), style::SetAttribute(style::Attribute::Reset))?;
-        set_color(style::Color::Cyan)?;
+        execute!( stdout(), style::SetForegroundColor(style::Color::Cyan) )?;
 
         clear_from(0, self.height_half, self.center as usize)?;
-
-
         print_at(">", x, self.height_half)?;
         
         for dir in self.path.components().filter(|comp| Component::RootDir != *comp).rev() {
@@ -247,18 +265,11 @@ impl Map {
     }
 
 
-    pub fn print(&self) -> Result<(), Error> {
-        clear()?;
-        self.print_path()?;
-        self.print_ls()?;
-
-        Ok(())
-    }
-
+    /// append the focused entry onto current path
     pub fn move_into(&mut self) -> Result<(), Error> {
         
         if self.ls.is_empty() {
-            set_focused_style(style::Color::DarkGrey)?;
+            apply_focused_entry_style(style::Color::DarkGrey)?;
             print_at("[Nothing here.]", self.center + Self::CENTER_GAP, self.height_half)?;
             
             return Ok(());
@@ -266,7 +277,7 @@ impl Map {
 
         if !self.ls[self.curr_i].file_type()?.is_dir() {
             let str = self.ls[self.curr_i].file_name().to_str().unwrap().to_string() + " [Not a directory.]";
-            set_focused_style(style::Color::DarkGrey)?;
+            apply_focused_entry_style(style::Color::DarkGrey)?;
             print_at(&str, self.center + Self::CENTER_GAP, self.height_half)?;
 
             return Ok(());
@@ -278,7 +289,7 @@ impl Map {
         self.set_path(self.path.join(&file_name))?;
 
         let new_center = 
-            (self.center + file_name.len() as u16 + 3) // add " \ xxxxx"
+            (self.center + file_name.len() as u16 + 3)  // center is moved to the right by " \ xxxxx".len()
             .min((self.width as f32 * 0.75) as u16);
 
         for y in 0..self.height {
@@ -294,6 +305,7 @@ impl Map {
         Ok(())
     }
 
+    /// pop one item from the current path
     pub fn move_out(&mut self) -> Result<(), Error> {
 
         let focused_dir_entry = 
@@ -309,7 +321,7 @@ impl Map {
         if self.path.pop() {
 
             if let Some(focused_dir_entry) = focused_dir_entry {
-                self.last_seen.insert(path_before_pop, FileDesc {
+                self.last_seen.insert(path_before_pop, EntryDesc {
                     name: focused_dir_entry.file_name(),
                     is_dir: focused_dir_entry.file_type()?.is_dir()
                 });
@@ -319,13 +331,13 @@ impl Map {
             let path_after_pop = self.path.as_os_str().to_os_string();
 
             if let Some(name_before_pop) = name_before_pop {
-                self.last_seen.insert(path_after_pop, FileDesc {
+                self.last_seen.insert(path_after_pop, EntryDesc {
                     name: name_before_pop.to_os_string(),
                     is_dir: true
                 });
             }
 
-            self.all_iter = Map::iter_dirs_first(&self.path)?;
+            self.entries_iter = Map::iter_dirs_first(&self.path)?;
             self.populate_ls()?;
 
             self.center = Map::path_display_width(&self.path).min(self.width_half as usize) as u16;
@@ -338,6 +350,7 @@ impl Map {
         Ok(())
     }
 
+    /// set focused entry to be the one above the current focused entry
     pub fn move_up(&mut self) -> Result<(), Error> {
         if self.curr_i > 0 {
             self.curr_i -= 1;
@@ -348,10 +361,11 @@ impl Map {
         Ok(())
     }
 
+    /// set focused entry to be the one below the current focused entry
     pub fn move_down(&mut self) -> Result<(), Error> {
         if !self.ls.is_empty() && self.curr_i < self.ls.len()-1 {
             self.curr_i += 1;
-            self.fill_up();
+            self.fill_to_bottom();
 
             return self.print_ls();
         }
@@ -359,31 +373,22 @@ impl Map {
         Ok(())
     }
 
+    /// the total width that displaying the current path will take up
     fn path_display_width(path: &PathBuf) -> usize {
         path.iter().fold(0, |acc, x| acc + x.len() + 3) // include " \ " after every component
             - 1 // " >" is behind the last component instead of " \ "
-            - 1 // 0 indexed
-            - 4 // ignore "\" + " \ " used by root dir
+            - 1 // crossterm's Print(x,y) command is 0 indexed
+            - 4 // ignore root dir "\"
     }
 
+    /// get the current path
     pub fn get_path(&self) -> &PathBuf {
         &self.path
     }
 }
 
 
-fn clear() -> Result<(), Error> {
-    execute!(
-        stdout(),
-        terminal::Clear(terminal::ClearType::All)    
-    )
-}
-
-fn set_color(color: style::Color) -> Result<(), Error> {
-    execute!( stdout(), style::SetForegroundColor(color) )
-}
-
-fn set_focused_style(color: style::Color) -> Result<(), Error> {
+fn apply_focused_entry_style(color: style::Color) -> Result<(), Error> {
     execute!( 
         stdout(), 
         style::SetAttribute(style::Attribute::Reset),
@@ -405,6 +410,8 @@ fn clear_from(x: u16, y: u16, amt: usize) -> Result<(), Error> {
         Print(" ".repeat(amt))
     )
 }
+
+/// print `str` at `x,y`, then clear from `x` -> `total_width`
 fn clear_row(str: &str, x: u16, y: u16, total_width: u16) -> Result<(), Error> {
     execute!(
         stdout(),
