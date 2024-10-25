@@ -5,6 +5,8 @@ nav
 nav -h, -help
     display this help page
 
+nav -uninstall
+    uninstall nav
 
 map controls
 --------------------------
