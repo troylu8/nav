@@ -28,7 +28,7 @@ elseif ($other) {
 }
 else {
     Clear-Host
-    & ($NAV_HOME + "\map\map.exe")
+    & ($NAV_HOME + "\map\navigator.exe")
     Clear-Host
-    Set-Location (Get-Content -Path ($NAV_HOME + "\map\map_dest.txt") -TotalCount 1)
+    Set-Location (Get-Content -Path ($NAV_HOME + "\map\nav_dest.txt") -TotalCount 1)
 }

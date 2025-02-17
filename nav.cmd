@@ -2,9 +2,9 @@
 
 IF "%~1"=="" (
     CLS
-    %NAV_HOME%\map\map.exe
+    %NAV_HOME%\map\navigator.exe
     CLS
-    FOR /F "delims=" %%i IN (%NAV_HOME%\map\map_dest.txt) DO CD %%i
+    FOR /F "delims=" %%i IN (%NAV_HOME%\map\nav_dest.txt) DO CD %%i
     GOTO end
 )
 IF "%~1"=="-h" GOTO help

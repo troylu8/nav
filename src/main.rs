@@ -6,9 +6,9 @@ use std::io::Error;
 
 use crossterm::event::*;
 use crossterm::{execute, cursor, style, terminal};
-use dir_display::DirDisplay;
 
-mod dir_display;
+use navigator::Navigator;
+mod navigator;
 
 fn main() -> Result<(), Error> {
     
@@ -21,7 +21,7 @@ fn main() -> Result<(), Error> {
     )?;
 
 
-    let mut nav = DirDisplay::new(env::current_dir()?)?;
+    let mut nav = Navigator::new(env::current_dir()?)?;
 
     loop {
         
@@ -38,15 +38,15 @@ fn main() -> Result<(), Error> {
                 KeyCode::Up | KeyCode::BackTab => nav.move_up()?,
                 KeyCode::Down | KeyCode::Tab => nav.move_down()?,
                 KeyCode::Enter => {
-                    fs::write(nav_home + "\\map\\map_dest.txt", nav.get_path().to_str().unwrap())?;
+                    fs::write(nav_home + "\\map\\nav_dest.txt", nav.get_path().to_str().unwrap())?;
                     break;
                 },
                 KeyCode::Esc => {
-                    fs::write(nav_home + "\\map\\map_dest.txt", ".")?;
+                    fs::write(nav_home + "\\map\\nav_dest.txt", ".")?;
                     break;
                 }
                 KeyCode::Char('c') if modifiers == KeyModifiers::CONTROL => {
-                    fs::write(nav_home + "\\map\\map_dest.txt", ".")?;
+                    fs::write(nav_home + "\\map\\nav_dest.txt", ".")?;
                     break;
                 }
                 _ => {}

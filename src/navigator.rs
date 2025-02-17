@@ -13,19 +13,32 @@ use crossterm::style::Print;
 /// distance between "C:\ some \ path >" and the list of entries
 const CENTER_GAP: u16 = 4;
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct Entry {
-    name: OsString,
+    name: String,
     is_dir: bool
+}
+impl Entry {
+    fn from_dir_entry(dir_entry: &DirEntry) -> Self {
+        Self {
+            name: get_filename_as_string(dir_entry),
+            is_dir: dir_entry.file_type().unwrap().is_dir()
+        }
+    }
 }
 impl PartialEq<DirEntry> for Entry {
     fn eq(&self, other: &DirEntry) -> bool {
-        other.file_name() == self.name && other.file_type().unwrap().is_dir() == self.is_dir
+        get_filename_as_string(other) == self.name && 
+        other.file_type().unwrap().is_dir() == self.is_dir
     }
 }
 
+fn get_filename_as_string(dir_entry: &DirEntry) -> String {
+    dir_entry.file_name().as_os_str().to_str().unwrap().to_string()
+}
+
 #[derive(Debug, Default)]
-pub struct DirDisplay {
+pub struct Navigator {
 
     width: u16,
     height: u16,
@@ -37,20 +50,21 @@ pub struct DirDisplay {
     path: PathBuf,
 
     /// list of all entries in the current path. 
-    entries: Vec<DirEntry>,
+    entries: Vec<Entry>,
 
     query: Option<String>,
+    filtered_entries: Option<Vec<Entry>>,
 
     /// index of the focused entry in `self.ls`
     pos: usize,
 
 }
 
-impl DirDisplay {
+impl Navigator {
     /// initialize a new map
     pub fn new(path: PathBuf) -> Result<Self, Error> {
 
-        let mut display = DirDisplay::default();
+        let mut display = Navigator::default();
         display.set_size(terminal::size().unwrap());
         display.set_path(path)?;
 
@@ -75,12 +89,12 @@ impl DirDisplay {
     pub fn set_path(&mut self, path: PathBuf) -> Result<(), Error> {
 
         match iter_dirs_first(&path) {
-            Ok(iter) => self.entries = iter.collect(),
+            Ok(iter) => self.entries = iter.map(|dir_entry| Entry::from_dir_entry(&dir_entry)).collect(),
             Err(err) => {
 
                 // display "permission denied" text
                 if err.kind() == std::io::ErrorKind::PermissionDenied {
-                    let str = self.entries[self.pos].file_name().to_str().unwrap().to_string() + " [Access is denied.]";
+                    let str = self.entries[self.pos].name.clone() + " [Access is denied.]";
                     apply_focused_entry_style(style::Color::DarkRed)?;
                     print_at(&str, self.center_x + CENTER_GAP, self.height / 2)?;
                 }
@@ -94,13 +108,30 @@ impl DirDisplay {
         
         self.path = path;
         self.pos = 0;
+        self.update_visible_entries();
 
         Ok(())
     }
 
     pub fn set_query(&mut self, query: Option<String>) {
         self.query = query;
-        self.pos = 0;
+        self.pos = 0;        
+        self.update_visible_entries();
+    }
+
+    fn update_visible_entries(&mut self) {
+        //TODO: fuzzy
+        self.filtered_entries = match &self.query {
+            None => None,
+            Some(query) => {
+                Some(
+                    self.entries.iter().filter_map(|entry| {
+                        if &entry.name == query { Some(entry.clone()) }
+                        else { None }
+                    }).collect()
+                )
+            },
+        };
     }
 
     /// print the current path
@@ -141,16 +172,6 @@ impl DirDisplay {
         execute!(stdout(), style::SetAttribute(style::Attribute::Reset))?;
 
         let mid_y = self.height / 2;
-        
-        //TODO: fuzzy
-        let visible_entries: Vec<&DirEntry> = match &self.query {
-            None => self.entries.iter().collect(),
-            Some(query) => {
-                self.entries.iter().filter(|entry| {
-                    entry.file_name() == OsString::from(query)
-                }).collect()
-            },
-        };
          
 
         let mut entry_i = 0.max(self.pos as i32 - mid_y as i32) as usize;
@@ -163,15 +184,20 @@ impl DirDisplay {
             clear_row("", x, y as u16, self.width)?;
         }
 
+        let entries_to_print = match &self.filtered_entries {
+            Some(filtered_entries) => filtered_entries,
+            None => &self.entries
+        };
+
         loop {
-            if y >= self.height || entry_i >= visible_entries.len() { break } 
+            if y >= self.height || entry_i >= entries_to_print.len() { break } 
             
             // non-directories should be dark grey
-            if !visible_entries[entry_i].file_type()?.is_dir() {
+            if !entries_to_print[entry_i].is_dir {
                 execute!( stdout(), style::SetForegroundColor(style::Color::DarkGrey) )?;
             }
 
-            clear_row(visible_entries[entry_i].file_name().to_str().unwrap(), x, y, self.width)?;
+            clear_row(&entries_to_print[entry_i].name, x, y, self.width)?;
 
             entry_i += 1;
             y += 1;
@@ -185,14 +211,14 @@ impl DirDisplay {
         // emphasize focused entry
         if !self.entries.is_empty() {
             
-            if self.entries[self.pos].file_type()?.is_dir() {
+            if self.entries[self.pos].is_dir {
                 apply_focused_entry_style(style::Color::DarkYellow)?;
             }
             else {
                 apply_focused_entry_style(style::Color::DarkGrey)?;
             }
             
-            print_at(self.entries[self.pos].file_name().to_str().unwrap(), x, mid_y)?;
+            print_at(&self.entries[self.pos].name, x, mid_y)?;
         }
 
         Ok(())
@@ -212,8 +238,8 @@ impl DirDisplay {
 
         let focused_entry = &self.entries[self.pos];
 
-        if !focused_entry.file_type()?.is_dir() {
-            let str = focused_entry.file_name().to_str().unwrap().to_string() + " [Not a directory.]";
+        if !focused_entry.is_dir {
+            let str = focused_entry.name.clone() + " [Not a directory.]";
             apply_focused_entry_style(style::Color::DarkGrey)?;
             print_at(&str, self.center_x + CENTER_GAP, mid_y)?;
 
@@ -221,7 +247,7 @@ impl DirDisplay {
         }
 
 
-        let file_name = focused_entry.file_name();
+        let file_name = &focused_entry.name;
 
         let old_center_x = self.center_x;
 
@@ -253,10 +279,7 @@ impl DirDisplay {
         if self.path.pop() {
 
             if let Some(focused_entry) = focused_entry {
-                self.last_seen.insert(path_before_pop, Entry {
-                    name: focused_entry.file_name(),
-                    is_dir: focused_entry.file_type()?.is_dir()
-                });
+                self.last_seen.insert(path_before_pop, focused_entry.clone());
             }
 
 
@@ -264,7 +287,7 @@ impl DirDisplay {
 
             if let Some(name_before_pop) = name_before_pop {
                 self.last_seen.insert(path_after_pop, Entry {
-                    name: name_before_pop.to_os_string(),
+                    name: name_before_pop.as_os_str().to_str().unwrap().to_string(),
                     is_dir: true
                 });
             }
