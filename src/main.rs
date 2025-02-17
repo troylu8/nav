@@ -6,8 +6,9 @@ use std::io::Error;
 
 use crossterm::event::*;
 use crossterm::{execute, cursor, style, terminal};
+use dir_display::DirDisplay;
 
-use nav::Map;
+mod dir_display;
 
 fn main() -> Result<(), Error> {
     
@@ -19,24 +20,25 @@ fn main() -> Result<(), Error> {
         terminal::DisableLineWrap,
     )?;
 
-    let mut map = Map::new(env::current_dir()?)?;
+
+    let mut nav = DirDisplay::new(env::current_dir()?)?;
 
     loop {
         
         if let Event::Key( KeyEvent {kind: KeyEventKind::Press, code, modifiers, ..}) = read()? {
             match code {
-                KeyCode::Left => map.move_out()?,
+                KeyCode::Left => nav.move_out()?,
                 KeyCode::Right => { 
-                    match map.move_into() {
+                    match nav.move_into() {
                         // ignore permission denied error
                         Err(err) if err.kind() != std::io::ErrorKind::PermissionDenied => return Err(err),
                         _ => {}
                     }
                 }, 
-                KeyCode::Up | KeyCode::BackTab => map.move_up()?,
-                KeyCode::Down | KeyCode::Tab => map.move_down()?,
+                KeyCode::Up | KeyCode::BackTab => nav.move_up()?,
+                KeyCode::Down | KeyCode::Tab => nav.move_down()?,
                 KeyCode::Enter => {
-                    fs::write(nav_home + "\\map\\map_dest.txt", map.get_path().to_str().unwrap())?;
+                    fs::write(nav_home + "\\map\\map_dest.txt", nav.get_path().to_str().unwrap())?;
                     break;
                 },
                 KeyCode::Esc => {
@@ -52,8 +54,12 @@ fn main() -> Result<(), Error> {
         }
     }
 
-    execute!( stdout(), cursor::Show )?;
-    execute!( stdout(), style::SetAttribute(style::Attribute::Reset) )?;
+    execute!( 
+        stdout(), 
+        cursor::Show,
+        style::SetAttribute(style::Attribute::Reset),
+        terminal::Clear(terminal::ClearType::All)
+    )?;
 
     Ok(())
 
